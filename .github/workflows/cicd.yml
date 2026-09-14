@@ -101,7 +101,7 @@ jobs:
         uses: actions/checkout@v7
 
       # --------------------------------------------
-      # 2. Authenticate GitHub to GCP
+      # 2. Authenticate GitHub to GCP AWS
       # --------------------------------------------
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
