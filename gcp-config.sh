@@ -11,6 +11,7 @@ export GITHUB_REPO="llmops-docker-cicd-demo"
 export GITHUB_REPOSITORY="$GITHUB_OWNER/$GITHUB_REPO"
 
 export DEPLOY_SA_NAME="github-cd"
+# added the repo
 export DEPLOY_SA="$DEPLOY_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
 
 echo "GCP configuration loaded"
