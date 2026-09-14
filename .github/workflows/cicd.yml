@@ -1,21 +1,24 @@
 name: FastAPI Docker CI-CD
 
 on:
+  # CI runs for Pull Requests targeting main
   pull_request:
     branches:
       - main
 
+  # CI + CD runs when main is updated
   push:
     branches:
       - main
 
+  # Allows manual execution from GitHub Actions
   workflow_dispatch:
 
 
 jobs:
 
   # =====================================================
-  # CI
+  # CI - TEST APPLICATION AND DOCKER CONTAINER
   # =====================================================
   ci:
     name: CI - Test and Validate Docker
@@ -27,14 +30,14 @@ jobs:
     steps:
 
       # -------------------------------------------------
-      # 1. Checkout
+      # 1. Checkout source code
       # -------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
 
       # -------------------------------------------------
-      # 2. Python
+      # 2. Setup Python
       # -------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -43,7 +46,7 @@ jobs:
 
 
       # -------------------------------------------------
-      # 3. Dependencies
+      # 3. Install Python dependencies
       # -------------------------------------------------
       - name: Install dependencies
         run: |
@@ -53,7 +56,7 @@ jobs:
 
 
       # -------------------------------------------------
-      # 4. Unit tests
+      # 4. Run unit tests
       # -------------------------------------------------
       - name: Run tests
         run: |
@@ -61,7 +64,7 @@ jobs:
 
 
       # -------------------------------------------------
-      # 5. Docker build
+      # 5. Build Docker image
       # -------------------------------------------------
       - name: Build Docker image
         run: |
@@ -71,7 +74,7 @@ jobs:
 
 
       # -------------------------------------------------
-      # 6. Run container
+      # 6. Run Docker container
       # -------------------------------------------------
       - name: Run Docker container
         run: |
@@ -82,11 +85,11 @@ jobs:
 
 
       # -------------------------------------------------
-      # 7. Health check
+      # 7. Verify application health
       # -------------------------------------------------
       - name: Health check
         run: |
-          echo "Waiting for application..."
+          echo "Waiting for application to start..."
 
           for i in {1..10}; do
 
@@ -119,17 +122,16 @@ jobs:
 
 
   # =====================================================
-  # CD
+  # CD - DEPLOY TO GCP CLOUD RUN
   # =====================================================
   cd:
     name: CD - Deploy to GCP Cloud Run
 
+    # CD starts only after CI succeeds
     needs: ci
 
-    # Deploy only from main.
-    # Supports:
-    #   1. Merge/push to main
-    #   2. Manual run from main
+    # Deployment only from main
+    # Supports push/merge and manual execution from main
     if: >
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' ||
@@ -137,14 +139,15 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    # Required for Workload Identity Federation
+
+    # Required for GitHub OIDC / Workload Identity Federation
     permissions:
       contents: read
       id-token: write
 
 
     # ---------------------------------------------------
-    # GCP deployment configuration
+    # Deployment Configuration
     # ---------------------------------------------------
     env:
       PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -161,54 +164,51 @@ jobs:
     steps:
 
       # -------------------------------------------------
-      # 1. Checkout
+      # 1. Checkout source code
       # -------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
 
       # -------------------------------------------------
-      # 2. Validate GitHub Secrets
+      # 2. Validate required GitHub secrets
       # -------------------------------------------------
       - name: Validate GCP configuration
         env:
           WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
           DEPLOY_SA: ${{ secrets.GCP_DEPLOY_SA }}
         run: |
-
           if [ -z "$PROJECT_ID" ]; then
-            echo "ERROR: GCP_PROJECT_ID secret is missing"
+            echo "ERROR: GCP_PROJECT_ID is missing"
             exit 1
           fi
 
           if [ -z "$WIF_PROVIDER" ]; then
-            echo "ERROR: GCP_WIF_PROVIDER secret is missing"
+            echo "ERROR: GCP_WIF_PROVIDER is missing"
             exit 1
           fi
 
           if [ -z "$DEPLOY_SA" ]; then
-            echo "ERROR: GCP_DEPLOY_SA secret is missing"
+            echo "ERROR: GCP_DEPLOY_SA is missing"
             exit 1
           fi
 
-          echo "GCP deployment configuration found"
+          echo "GCP configuration validated"
 
 
       # -------------------------------------------------
-      # 3. Authenticate GitHub -> GCP
+      # 3. Authenticate GitHub -> Google Cloud
       # -------------------------------------------------
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
-
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
 
 
       # -------------------------------------------------
-      # 4. Setup gcloud
+      # 4. Install / configure gcloud
       # -------------------------------------------------
       - name: Setup Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v3
@@ -217,52 +217,68 @@ jobs:
 
 
       # -------------------------------------------------
-      # 5. Verify GCP authentication
+      # 5. Verify authentication
       # -------------------------------------------------
       - name: Verify Google Cloud authentication
         run: |
-
-          echo "Checking authenticated account..."
-
+          echo "Authenticated account:"
           gcloud auth list
 
-          echo "Checking project..."
-
+          echo ""
+          echo "Current project:"
           gcloud config get-value project
 
 
       # -------------------------------------------------
-      # 6. Define Docker image name
+      # 6. Create unique Docker image name
+      #
+      # Example:
+      # asia-south1-docker.pkg.dev/project/
+      # llmops-docker/rahul-chatbot:<git-sha>
       # -------------------------------------------------
       - name: Define Docker image
         run: |
-
           IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/${SERVICE}:${GITHUB_SHA}"
 
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
-          echo "Docker image configured"
+          echo "Docker image:"
+          echo "$IMAGE"
 
 
       # -------------------------------------------------
-      # 7. Build Docker image using Cloud Build
-      #    and push to Artifact Registry
+      # 7. Authenticate Docker with Artifact Registry
       # -------------------------------------------------
-      - name: Build and push image
+      - name: Configure Docker for Artifact Registry
         run: |
+          gcloud auth configure-docker \
+            "${REGION}-docker.pkg.dev" \
+            --quiet
 
-          gcloud builds submit \
-            --project "$PROJECT_ID" \
-            --tag "$IMAGE" \
+
+      # -------------------------------------------------
+      # 8. Build production Docker image
+      # -------------------------------------------------
+      - name: Build production Docker image
+        run: |
+          docker build \
+            -t "$IMAGE" \
             .
 
 
       # -------------------------------------------------
-      # 8. Deploy to Cloud Run
+      # 9. Push image to Artifact Registry
+      # -------------------------------------------------
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push "$IMAGE"
+
+
+      # -------------------------------------------------
+      # 10. Deploy image to Cloud Run
       # -------------------------------------------------
       - name: Deploy to Cloud Run
         run: |
-
           gcloud run deploy "$SERVICE" \
             --project "$PROJECT_ID" \
             --image "$IMAGE" \
@@ -272,11 +288,10 @@ jobs:
 
 
       # -------------------------------------------------
-      # 9. Get production URL
+      # 11. Get deployed Cloud Run URL
       # -------------------------------------------------
       - name: Get Cloud Run URL
         run: |
-
           SERVICE_URL=$(gcloud run services describe "$SERVICE" \
             --project "$PROJECT_ID" \
             --region "$REGION" \
@@ -284,16 +299,18 @@ jobs:
 
           echo "SERVICE_URL=$SERVICE_URL" >> "$GITHUB_ENV"
 
-          echo "Cloud Run deployment completed"
+          echo ""
+          echo "Application deployed successfully:"
+          echo "$SERVICE_URL"
 
 
       # -------------------------------------------------
-      # 10. Production health check
+      # 12. Production health check
       # -------------------------------------------------
       - name: Production health check
         run: |
-
-          echo "Checking production application..."
+          echo "Testing:"
+          echo "$SERVICE_URL/health"
 
           for i in {1..10}; do
 
@@ -304,9 +321,8 @@ jobs:
               exit 0
             fi
 
-            echo "Production application not ready yet..."
+            echo "Cloud Run is not ready yet..."
             sleep 5
-            echo "Retrying..."
 
           done
 
