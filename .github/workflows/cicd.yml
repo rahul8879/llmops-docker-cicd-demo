@@ -12,7 +12,6 @@ on:
   workflow_dispatch:
 
 jobs:
-
   # =====================================================
   # CI
   # =====================================================
@@ -24,7 +23,6 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v6
 
@@ -40,8 +38,7 @@ jobs:
           pip install pytest httpx
 
       - name: Run tests
-        run: |
-          pytest -q
+        run: pytest -q
 
       - name: Build Docker image
         run: |
@@ -69,9 +66,7 @@ jobs:
           done
 
           echo "Health check failed"
-
           docker logs rahul-chatbot
-
           exit 1
 
       - name: Cleanup container
@@ -79,27 +74,92 @@ jobs:
         run: |
           docker rm -f rahul-chatbot || true
 
-
   # =====================================================
   # CD
   # =====================================================
   cd:
-    name: CD - Deploy to Hugging Face
+    name: CD - Deploy to GCP Cloud Run
     needs: ci
-
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: asia-south1
+      ARTIFACT_REPO: llmops-docker
+      SERVICE: rahul-chatbot
+
     steps:
-
+      # --------------------------------------------
+      # 1. Checkout source
+      # --------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Deploy to Hugging Face Space
-        uses: huggingface/hub-sync@v0.1.0
+      # --------------------------------------------
+      # 2. Authenticate GitHub to GCP
+      # --------------------------------------------
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
         with:
-          github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: YOUR_HF_USERNAME/rahul-chatbot
-          hf_token: ${{ secrets.HF_TOKEN }}
-          space_sdk: docker
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      # --------------------------------------------
+      # 3. Install and configure gcloud
+      # --------------------------------------------
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      # --------------------------------------------
+      # 4. Define unique Docker image
+      # --------------------------------------------
+      - name: Define image
+        run: |
+          echo "IMAGE=${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/${SERVICE}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      # --------------------------------------------
+      # 5. Build and push to Artifact Registry
+      # --------------------------------------------
+      - name: Build and push image
+        run: |
+          gcloud builds submit \
+            --tag "$IMAGE" \
+            .
+
+      # --------------------------------------------
+      # 6. Deploy image to Cloud Run
+      # --------------------------------------------
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --port 7860 \
+            --quiet
+
+      # --------------------------------------------
+      # 7. Get deployed URL
+      # --------------------------------------------
+      - name: Get Cloud Run URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe "$SERVICE" \
+            --region "$REGION" \
+            --format="value(status.url)")
+
+          echo "SERVICE_URL=$SERVICE_URL" >> "$GITHUB_ENV"
+          echo "Application deployed to: $SERVICE_URL"
+
+      # --------------------------------------------
+      # 8. Production health check
+      # --------------------------------------------
+      - name: Production health check
+        run: |
+          curl --fail "$SERVICE_URL/health"
