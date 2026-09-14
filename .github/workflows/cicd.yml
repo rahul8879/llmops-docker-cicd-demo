@@ -306,6 +306,7 @@ jobs:
 
             echo "Production application not ready yet..."
             sleep 5
+            echo "Retrying..."
 
           done
 
